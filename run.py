@@ -181,20 +181,29 @@ def main(argv=None) -> None:
     height   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[run.py] Input: {width}×{height} @ {fps:.2f} FPS, {n_frames} frames")
 
-    # ---- output path ------------------------------------------------------
+    # ---- output folder: outputs/<video_stem>/ --------------------------------
+    out_dir = Path("outputs") / input_path.stem
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    stem = input_path.stem
     if args.output:
         out_path = Path(args.output)
     else:
-        out_path = input_path.parent / f"relit_{input_path.stem}.mp4"
+        out_path = out_dir / f"{stem}_relit.mp4"
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    matte_path   = out_dir / f"{stem}_matte.mp4"
+    normals_path = out_dir / f"{stem}_normals.mp4"
 
     if args.debug:
-        debug_path = out_path.with_stem(out_path.stem + "_debug")
+        debug_path = out_dir / f"{stem}_debug.mp4"
+
+    print(f"[run.py] Saving outputs to: {out_dir}/")
 
     # ---- video writer(s) --------------------------------------------------
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (width, height))
+    writer          = cv2.VideoWriter(str(out_path),      fourcc, fps, (width, height))
+    matte_writer    = cv2.VideoWriter(str(matte_path),   fourcc, fps, (width, height))
+    normals_writer  = cv2.VideoWriter(str(normals_path), fourcc, fps, (width, height))
 
     debug_writer: Optional[cv2.VideoWriter] = None
     if args.debug:
@@ -243,20 +252,27 @@ def main(argv=None) -> None:
 
             t0 = time.perf_counter()
 
+            # Always run the debug variant so we have intermediates to save.
+            result = pipeline.process_frame_with_debug(frame_bgr, light, background)
+            output_bgr = result["output"]
+
+            # alpha is (H,W) uint8 grayscale → convert to 3-ch for VideoWriter
+            alpha_bgr   = cv2.cvtColor(result["alpha"], cv2.COLOR_GRAY2BGR)
+            # normals_smooth is already (H,W,3) uint8
+            normals_bgr = result["normals_smooth"]
+
+            writer.write(output_bgr)
+            matte_writer.write(alpha_bgr)
+            normals_writer.write(normals_bgr)
+
             if args.debug:
-                result = pipeline.process_frame_with_debug(frame_bgr, light, background)
-                output_bgr  = result["output"]
-                debug_tile  = _build_debug_tile(
+                debug_tile = _build_debug_tile(
                     output_bgr,
                     result["alpha"],
                     result["normals_smooth"],
                     result["depth"],
                 )
                 debug_writer.write(debug_tile)
-            else:
-                output_bgr = pipeline.process_frame(frame_bgr, light, background)
-
-            writer.write(output_bgr)
 
             # FPS reporting
             elapsed = time.perf_counter() - t0
@@ -279,6 +295,8 @@ def main(argv=None) -> None:
     finally:
         cap.release()
         writer.release()
+        matte_writer.release()
+        normals_writer.release()
         if debug_writer is not None:
             debug_writer.release()
 
@@ -287,7 +305,9 @@ def main(argv=None) -> None:
     print(
         f"\n[run.py] Done. {frame_idx} frames in {total_time:.1f}s "
         f"({avg_fps:.1f} FPS avg).\n"
-        f"  Output:  {out_path}"
+        f"  Relit:   {out_path}\n"
+        f"  Matte:   {matte_path}\n"
+        f"  Normals: {normals_path}"
     )
     if args.debug:
         print(f"  Debug:   {debug_path}")

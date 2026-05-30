@@ -40,12 +40,36 @@ class RVMMatting:
         downsample_ratio: float = 0.25,
     ) -> None:
         self._downsample_ratio = float(downsample_ratio)
-        self._recurrent: list[Optional[np.ndarray]] = [None, None, None, None]
         self._session = self._load_session(Path(checkpoint_dir) / _ONNX_FILENAME, device)
+        # Zero-initialise recurrent states using shapes declared in the ONNX graph.
+        # The RVM ONNX model always requires r1i–r4i; they cannot be omitted.
+        self._recurrent: list[np.ndarray] = self._init_recurrent()
 
     # ------------------------------------------------------------------
     # internal helpers
     # ------------------------------------------------------------------
+
+    def _init_recurrent(self) -> list[np.ndarray]:
+        """
+        Build zero-filled recurrent state tensors whose shapes are read from
+        the ONNX model's input metadata.  The RVM ONNX graph declares dynamic
+        spatial dims for r1i–r4i, so we use (1, C, 1, 1) as the initial shape;
+        ONNX Runtime will broadcast / handle the actual spatial dims internally.
+        """
+        recurrent_names = ["r1i", "r2i", "r3i", "r4i"]
+        inputs_by_name = {inp.name: inp for inp in self._session.get_inputs()}
+        states = []
+        for name in recurrent_names:
+            if name in inputs_by_name:
+                # Shape entries may be strings (dynamic) or ints.
+                # Substitute 1 for any dynamic (string) dimension.
+                raw_shape = inputs_by_name[name].shape
+                shape = tuple(d if isinstance(d, int) else 1 for d in raw_shape)
+            else:
+                # Fallback: (1, 1, 1, 1) — will be overwritten after first run
+                shape = (1, 1, 1, 1)
+            states.append(np.zeros(shape, dtype=np.float32))
+        return states
 
     @staticmethod
     def _load_session(onnx_path: Path, device: str):
@@ -83,7 +107,7 @@ class RVMMatting:
 
     def reset(self) -> None:
         """Reset recurrent states (call between independent video clips)."""
-        self._recurrent = [None, None, None, None]
+        self._recurrent = self._init_recurrent()
 
     def __call__(
         self, frame_bgr: np.ndarray
@@ -109,9 +133,11 @@ class RVMMatting:
         feed: dict = {
             "src": src,
             "downsample_ratio": np.array([self._downsample_ratio], dtype=np.float32),
+            "r1i": r1i,
+            "r2i": r2i,
+            "r3i": r3i,
+            "r4i": r4i,
         }
-        if r1i is not None:
-            feed.update({"r1i": r1i, "r2i": r2i, "r3i": r3i, "r4i": r4i})
 
         # Fetch only the outputs that exist in the model
         output_names = [o.name for o in self._session.get_outputs()]
